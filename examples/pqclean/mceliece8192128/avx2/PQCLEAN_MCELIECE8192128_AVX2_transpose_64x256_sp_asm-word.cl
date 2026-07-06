@@ -1,3 +1,32 @@
+(* on popper (commit a73f8cd8366):
+   cv -v -jobs 124 -slicing -no_carry_constraint -isafety -domains -tmpdir /dev/shm
+Parsing CryptoLine file:			[OK]		14.1623 seconds
+Checking well-formedness:			[OK]		1.5633 seconds
+
+Procedure main
+==============
+Transforming to SSA form:			[OK]		1.1102 seconds
+Normalizing specification:			[OK]		2.7482 seconds
+Rewriting assignments:				[OK]		1.7730 seconds
+Verifying program safety:
+	Cut 0
+	     Round 1 (0 safety conditions, timeout = 300. seconds)
+	Cut 1
+	     Round 1 (0 safety conditions, timeout = 300. seconds)
+	Overall					[OK]		0.1002 seconds
+Verifying range specification:			[OK]		4.5299 seconds
+Rewriting value-preserved casting:		[OK]		0.1046 seconds
+Verifying algebraic specification:		[OK]		1.6370 seconds
+
+Procedure Summary
+-----------------
+Procedure verification:				[OK]		12.5611 seconds
+
+Summary
+=======
+Verification result:				[OK]		28.3060 seconds
+*)
+
 (*
 on iruka: -v -jobs 24 -isafety -slicing
 Parsing CryptoLine file:                        [OK]            11.1808 seconds

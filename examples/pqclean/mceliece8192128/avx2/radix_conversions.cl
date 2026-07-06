@@ -3,6 +3,64 @@ Merging polyvar track and default track will make verification fail
 due to large memory consumption (more than 1TB).
 *)
 
+(* on popper (commit a73f8cd8366):
+   cv -v -jobs 124 -slicing -no_carry_constraint -isafety -domains -tmpdir /dev/shm radix_conversions.cl
+Parsing CryptoLine file:                        [OK]            3.6425 seconds
+Checking well-formedness:                       [OK]            1.2019 seconds
+
+Procedure PQCLEAN_MCELIECE8192128_AVX2_vec128_mul_asm
+=====================================================
+Transforming to SSA form:                       [OK]            0.1762 seconds
+Normalizing specification:                      [OK]            0.4409 seconds
+Rewriting assignments:                          [OK]            0.1609 seconds
+Verifying program safety:
+        Overall                                 [OK]            18.0417 seconds
+Verifying range specification:                  [OK]            0.0047 seconds
+Rewriting value-preserved casting:              [OK]            0.0141 seconds
+Verifying algebraic specification:              [OK]            0.4511 seconds
+
+Procedure Summary
+-----------------
+Procedure verification:                         [OK]            19.3989 seconds
+
+Procedure main
+==============
+
+Track polyvar
+-------------
+Transforming to SSA form:                       [OK]            0.7644 seconds
+Normalizing specification:                      [OK]            1.6411 seconds
+Rewriting assignments:                          [OK]            1.4227 seconds
+Verifying range assertions:                     [OK]            0.0311 seconds
+Verifying range specification:                  [OK]            0.0157 seconds
+Rewriting value-preserved casting:              [OK]            0.0551 seconds
+Verifying algebraic assertions:                 [OK]            0.0121 seconds
+Verifying algebraic specification:              [OK]            0.6249 seconds
+Track verification:                             [OK]            5.0560 seconds
+
+Track default
+-------------
+Transforming to SSA form:                       [OK]            0.6632 seconds
+Normalizing specification:                      [OK]            1.6208 seconds
+Rewriting assignments:                          [OK]            1.4291 seconds
+Verifying program safety:
+        Overall                                 [OK]            20.6687 seconds
+Verifying range assertions:                     [OK]            0.0078 seconds
+Verifying range specification:                  [OK]            0.0097 seconds
+Rewriting value-preserved casting:              [OK]            0.0430 seconds
+Verifying algebraic assertions:                 [OK]            0.0097 seconds
+Verifying algebraic specification:              [OK]            470.3951 seconds
+Track verification:                             [OK]            495.2311 seconds
+
+Procedure Summary
+-----------------
+Procedure verification:                         [OK]            500.2917 seconds
+
+Summary
+=======
+Verification result:                            [OK]            524.5547 seconds
+*)
+
 (* on frege: -v -isafety -slicing -jobs 24 -no_carry_constraint
 Parsing CryptoLine file:                        [OK]            3.8937 seconds
 Checking well-formedness:                       [OK]            1.5312 seconds

@@ -1,3 +1,28 @@
+(* on popper (commit a73f8cd8366):
+   cv -v -jobs 124 -slicing -no_carry_constraint -isafety -domains -tmpdir /dev/shm
+Parsing CryptoLine file:                        [OK]            0.6395 seconds
+Checking well-formedness:                       [OK]            0.2437 seconds
+
+Procedure main
+==============
+Transforming to SSA form:                       [OK]            0.1948 seconds
+Normalizing specification:                      [OK]            0.4441 seconds
+Rewriting assignments:                          [OK]            0.1870 seconds
+Verifying program safety:
+        Overall                                 [OK]            14.6476 seconds
+Verifying range specification:                  [OK]            0.0055 seconds
+Rewriting value-preserved casting:              [OK]            0.0154 seconds
+Verifying algebraic specification:              [OK]            0.2714 seconds
+
+Procedure Summary
+-----------------
+Procedure verification:                         [OK]            15.8676 seconds
+
+Summary
+=======
+Verification result:                            [OK]            16.7528 seconds
+*)
+
 (*
 Run on iruka with command:
 $ cv -v -jobs 4 -isafety -slicing -no_carry_constraint PQCLEAN_MCELIECE8192128_AVX2_vec128_mul_asm.cl
