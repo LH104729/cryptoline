@@ -863,19 +863,169 @@ let algebra_symbol_of_ebinop op =
   | Epow -> "^"
   | _ -> symbol_of_ebinop op
 
-let rec singular_of_eexp e =
+(* Packed-limb abstraction for Singular. *)
+
+type singular_pack = { pack_name : string; pack_expr : eexp; pack_key : string }
+
+let rec flatten_eadds e =
+  match e with
+  | Ebinop (Eadd, e1, e2) -> flatten_eadds e1 @ flatten_eadds e2
+  | _ -> [e]
+
+let power_of_two_exponent e =
+  match e with
+  | Ebinop (Epow, Econst two, Econst exponent)
+      when Z.equal two (Z.of_int 2) && Z.sign exponent >= 0 -> Some exponent
+  | Econst coefficient when Z.sign coefficient > 0 ->
+     let rec loop n value =
+       if Z.equal value Z.one then Some (Z.of_int n)
+       else if Z.equal (Z.erem value (Z.of_int 2)) Z.zero
+       then loop (n + 1) (Z.ediv value (Z.of_int 2))
+       else None in
+     loop 0 coefficient
+  | _ -> None
+
+let limb_term e =
+  match e with
+  | Ebinop (Emul, value, coefficient) ->
+     (match power_of_two_exponent coefficient with
+      | Some exponent -> Some (exponent, value)
+      | None ->
+         (match power_of_two_exponent value with
+          | Some exponent -> Some (exponent, coefficient)
+          | None -> None))
+  | _ -> Some (Z.zero, e)
+
+let is_packed_limb_expression e =
+  let terms = flatten_eadds e in
+  if List.length terms < 2 then false
+  else
+    let parsed = List.map limb_term terms in
+    if not (List.for_all Option.is_some parsed) then false
+    else
+      let exponents =
+        List.sort Z.compare (List.map (fun item -> fst (Option.get item)) parsed) in
+      match exponents with
+      | zero :: second :: rest when Z.equal zero Z.zero && Z.sign second > 0 ->
+         let stride = second in
+         let rec check expected = function
+           | [] -> true
+           | hd :: tl -> Z.equal hd expected && check (Z.add expected stride) tl in
+         check (Z.add stride stride) rest
+      | _ -> false
+
+let collect_singular_packs vars expressions =
+  if not !algebra_pack_limbs then []
+  else
+    let used =
+      List.fold_left (fun names v -> SS.add v.cached_name names) SS.empty vars in
+    let prefix = new_name ~prefix:"cl_pack" used in
+    let seen = Hashtbl.create 31 in
+    let packs = ref [] in
+    let next = ref 0 in
+    let rec visit e =
+      if is_packed_limb_expression e then begin
+        let key = string_of_eexp e in
+        if not (Hashtbl.mem seen key) then begin
+          let name = prefix ^ "_" ^ string_of_int !next in
+          incr next;
+          Hashtbl.add seen key name;
+          packs := { pack_name = name; pack_expr = e; pack_key = key } :: !packs
+        end
+      end else
+        match e with
+        | Evar _ | Econst _ -> ()
+        | Eunop (_, e1) -> visit e1
+        | Ebinop (_, e1, e2) -> visit e1; visit e2 in
+    List.iter visit expressions;
+    List.rev !packs
+
+let singular_pack_low_limb pack =
+  let parsed = List.filter_map limb_term (flatten_eadds pack.pack_expr) in
+  match List.find_opt (fun (exponent, _) -> Z.equal exponent Z.zero) parsed with
+  | Some (_, Evar low_limb) -> Some low_limb
+  | _ -> None
+
+let singular_low_limb_substitutions packs =
+  let table = Hashtbl.create (max 1 (List.length packs)) in
+  let seen_low_limbs = Hashtbl.create (max 1 (List.length packs)) in
+  let selected = ref [] in
+  let add_pack pack =
+    let parsed = List.filter_map limb_term (flatten_eadds pack.pack_expr) in
+    match List.find_opt (fun (exponent, _) -> Z.equal exponent Z.zero) parsed with
+    | Some (_, Evar low_limb) when not (Hashtbl.mem seen_low_limbs low_limb.cached_name) ->
+       let tail =
+         List.filter_map
+           (fun term ->
+             match limb_term term with
+             | Some (exponent, _) when not (Z.equal exponent Z.zero) -> Some term
+             | _ -> None)
+           (flatten_eadds pack.pack_expr) in
+       if tail <> [] then begin
+         Hashtbl.add seen_low_limbs low_limb.cached_name ();
+         Hashtbl.add table low_limb.cached_name (pack.pack_name, tail);
+         selected := pack :: !selected
+       end
+    | _ -> () in
+  List.iter add_pack packs;
+  (List.rev !selected, table)
+
+let rec singular_of_eexp_raw e =
   match e with
   | Evar v -> v.cached_name
-  | Econst n -> "bigint(" ^ (Z.to_string n) ^ ")"
-  | Eunop (op, e) ->
-     symbol_of_eunop op ^ (if is_eexp_atom e then singular_of_eexp e else " (" ^ singular_of_eexp e ^ ")")
-  | Ebinop (Epow, e, Econst z) ->
-     (if eexp_ebinop_open e Epow then singular_of_eexp e
-      else "(" ^ singular_of_eexp e ^ ")") ^ algebra_symbol_of_ebinop Epow ^ Z.to_string z
+  | Econst n -> "bigint(" ^ Z.to_string n ^ ")"
+  | Eunop (op, e1) ->
+     symbol_of_eunop op ^
+       (if is_eexp_atom e1 then singular_of_eexp_raw e1
+        else " (" ^ singular_of_eexp_raw e1 ^ ")")
+  | Ebinop (Epow, e1, Econst z) ->
+     (if eexp_ebinop_open e1 Epow then singular_of_eexp_raw e1
+      else "(" ^ singular_of_eexp_raw e1 ^ ")") ^
+     algebra_symbol_of_ebinop Epow ^ Z.to_string z
   | Ebinop (op, e1, e2) ->
-     (if eexp_ebinop_open e1 op then singular_of_eexp e1 else "(" ^ singular_of_eexp e1 ^ ")")
-     ^ " " ^ algebra_symbol_of_ebinop op ^ " "
-     ^ (if ebinop_eexp_open op e2 then singular_of_eexp e2 else "(" ^ singular_of_eexp e2 ^ ")")
+     (if eexp_ebinop_open e1 op then singular_of_eexp_raw e1
+      else "(" ^ singular_of_eexp_raw e1 ^ ")") ^
+     " " ^ algebra_symbol_of_ebinop op ^ " " ^
+     (if ebinop_eexp_open op e2 then singular_of_eexp_raw e2
+      else "(" ^ singular_of_eexp_raw e2 ^ ")")
+
+let singular_low_limb_replacement pack_name tail =
+  let tail_string =
+    String.concat " + "
+      (List.map
+         (fun term ->
+           if is_eexp_atom term then singular_of_eexp_raw term
+           else "(" ^ singular_of_eexp_raw term ^ ")")
+         tail) in
+  pack_name ^ " - (" ^ tail_string ^ ")"
+
+let rec singular_of_eexp_with_low_substitutions table e =
+  match e with
+  | Evar v ->
+     (match Hashtbl.find_opt table v.cached_name with
+      | None -> v.cached_name
+      | Some (pack_name, tail) ->
+         "(" ^ singular_low_limb_replacement pack_name tail ^ ")")
+  | Econst n -> "bigint(" ^ Z.to_string n ^ ")"
+  | Eunop (op, e1) ->
+     symbol_of_eunop op ^
+       (if is_eexp_atom e1 then singular_of_eexp_with_low_substitutions table e1
+        else " (" ^ singular_of_eexp_with_low_substitutions table e1 ^ ")")
+  | Ebinop (Epow, e1, Econst z) ->
+     (if eexp_ebinop_open e1 Epow
+      then singular_of_eexp_with_low_substitutions table e1
+      else "(" ^ singular_of_eexp_with_low_substitutions table e1 ^ ")") ^
+     algebra_symbol_of_ebinop Epow ^ Z.to_string z
+  | Ebinop (op, e1, e2) ->
+     (if eexp_ebinop_open e1 op
+      then singular_of_eexp_with_low_substitutions table e1
+      else "(" ^ singular_of_eexp_with_low_substitutions table e1 ^ ")") ^
+     " " ^ algebra_symbol_of_ebinop op ^ " " ^
+     (if ebinop_eexp_open op e2
+      then singular_of_eexp_with_low_substitutions table e2
+      else "(" ^ singular_of_eexp_with_low_substitutions table e2 ^ ")")
+
+let singular_of_eexp e = singular_of_eexp_raw e
 
 let rec sage_of_eexp e =
   match e with
@@ -955,63 +1105,101 @@ let get_mon_ord order solver =
   | Some ord -> ord
 
 let bprint_singular_input ?comments buf vars gen p =
+  let detected_packs = collect_singular_packs vars (p :: gen) in
+  let packs, low_substitutions = singular_low_limb_substitutions detected_packs in
+  let low_limb_names =
+    List.filter_map
+      (fun pack -> Option.map (fun v -> v.cached_name) (singular_pack_low_limb pack))
+      packs in
+  let low_limb_name_set =
+    List.fold_left (fun names name -> SS.add name names) SS.empty low_limb_names in
+  let pack_names = List.map (fun pack -> pack.pack_name) packs in
+  let remaining_names =
+    List.filter_map
+      (fun v ->
+        if SS.mem v.cached_name low_limb_name_set then None else Some v.cached_name)
+      vars in
+  let names = low_limb_names @ pack_names @ remaining_names in
+  let generators =
+    List.map (singular_of_eexp_with_low_substitutions low_substitutions) gen
+    @ List.map
+        (fun pack ->
+          pack.pack_name ^ " - (" ^ singular_of_eexp_raw pack.pack_expr ^ ")")
+        packs in
   let bprint_varseq () =
-    match vars with
-    | [] -> Buffer.add_char buf 'x'
-    | _ -> bprint_list buf "," (fun buf v -> Buffer.add_string buf v.cached_name) vars in
+    match names with [] -> Buffer.add_char buf 'x'
+    | _ -> Buffer.add_string buf (String.concat "," names) in
   let bprint_generator () =
-    if List.length gen = 0
-    then Buffer.add_char buf '0'
-    else (bprint_list buf ",\n  " bprint_eexp_singular gen) in
-  let bprint_poly () = bprint_eexp_singular buf p in
+    match generators with [] -> Buffer.add_char buf '0'
+    | _ -> Buffer.add_string buf (String.concat ",\n  " generators) in
   let bprint_comment () =
-    if !debug then
-      match comments with
-      | None -> ()
-      | Some comments ->
-        bprint_list buf "\n" (
-          fun buf c ->
-            Buffer.add_string buf "// ";
-            Buffer.add_string buf c
-        ) comments
-    else () in
-  let mon_ord = get_mon_ord !monomial_order Singular in
+    if !debug then match comments with
+    | None -> ()
+    | Some comments -> bprint_list buf "\n"
+        (fun buf c -> Buffer.add_string buf "// "; Buffer.add_string buf c) comments in
+  let mon_ord =
+    match low_limb_names with
+    | [] -> get_mon_ord !monomial_order Singular
+    | _ ->
+       let low_count = List.length low_limb_names in
+       let remaining_count = List.length names - low_count in
+       if remaining_count = 0 then Printf.sprintf "lp(%d)" low_count
+       else Printf.sprintf "(lp(%d),dp(%d))" low_count remaining_count in
   bprint_comment(); Buffer.add_char buf '\n';
-  Buffer.add_string buf "proc is_generator(poly p, ideal I) {"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "  int idx;"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "  for (idx=1; idx<=size(I); idx++) {"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "    if (p == I[idx]) { return (0==0); }"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "  }"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "  return (0==1);"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "}"; Buffer.add_char buf '\n';
-  Buffer.add_string buf ""; Buffer.add_char buf '\n';
-  Buffer.add_string buf "ring r = integer, ("; bprint_varseq(); Buffer.add_string buf "), "; Buffer.add_string buf mon_ord; Buffer.add_char buf ';'; Buffer.add_char buf '\n';
-  Buffer.add_string buf "ideal gs = "; bprint_generator(); Buffer.add_char buf ';'; Buffer.add_char buf '\n';
-  Buffer.add_string buf "poly p = "; bprint_poly(); Buffer.add_char buf ';'; Buffer.add_char buf '\n';
-  Buffer.add_string buf "if (is_generator(p, gs) || reduce(p, gs) == 0) {"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "  0;"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "} else {"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "  ideal I = groebner(gs);"; Buffer.add_char buf '\n';
-  Buffer.add_string buf "  reduce(p, I);"; Buffer.add_char buf '\n';
-  Buffer.add_char buf '}'; Buffer.add_char buf '\n';
-  Buffer.add_string buf "exit;"; Buffer.add_char buf '\n'
+  Buffer.add_string buf "proc is_generator(poly p, ideal I) {\n";
+  Buffer.add_string buf "  int idx;\n  for (idx=1; idx<=size(I); idx++) {\n";
+  Buffer.add_string buf "    if (p == I[idx]) { return (0==0); }\n  }\n";
+  Buffer.add_string buf "  return (0==1);\n}\n\n";
+  Buffer.add_string buf "ring r = integer, ("; bprint_varseq();
+  Buffer.add_string buf "), "; Buffer.add_string buf mon_ord; Buffer.add_string buf ";\n";
+  Buffer.add_string buf "ideal gs = "; bprint_generator(); Buffer.add_string buf ";\n";
+  Buffer.add_string buf "poly p = ";
+  Buffer.add_string buf (singular_of_eexp_with_low_substitutions low_substitutions p);
+  Buffer.add_string buf ";\n";
+  Buffer.add_string buf "if (is_generator(p, gs) || reduce(p, gs) == 0) {\n";
+  Buffer.add_string buf "  0;\n} else {\n  ideal I = groebner(gs);\n";
+  Buffer.add_string buf "  reduce(p, I);\n}\nexit;\n"
 
 let generate_singular_input ?comments vars gen p =
-  let varseq =
-    match vars with
-    | [] -> "x"
-    | _ -> String.concat "," (tmap (fun v -> v.cached_name) vars) in
-  let generator =
-    if List.length gen = 0
-    then "0"
-    else (String.concat ",\n  " (tmap singular_of_eexp gen)) in
-  let poly = singular_of_eexp p in
+  let detected_packs = collect_singular_packs vars (p :: gen) in
+  let packs, low_substitutions = singular_low_limb_substitutions detected_packs in
+  let low_limb_names =
+    List.filter_map
+      (fun pack -> Option.map (fun v -> v.cached_name) (singular_pack_low_limb pack))
+      packs in
+  let low_limb_name_set =
+    List.fold_left (fun names name -> SS.add name names) SS.empty low_limb_names in
+  let pack_names = List.map (fun pack -> pack.pack_name) packs in
+  let remaining_names =
+    List.filter_map
+      (fun v ->
+        if SS.mem v.cached_name low_limb_name_set then None else Some v.cached_name)
+      vars in
+  let names = low_limb_names @ pack_names @ remaining_names in
+  let varseq = match names with [] -> "x" | _ -> String.concat "," names in
+  let generators =
+    List.map (singular_of_eexp_with_low_substitutions low_substitutions) gen
+    @ List.map
+        (fun pack ->
+          pack.pack_name ^ " - (" ^ singular_of_eexp_raw pack.pack_expr ^ ")")
+        packs in
+  let generator = match generators with
+    | [] -> "0"
+    | _ -> String.concat ",\n  " generators in
+  let poly = singular_of_eexp_with_low_substitutions low_substitutions p in
   let comment =
     if !debug
     then Option.value (Option.map (make_line_comments "//") comments)
            ~default:""
     else "" in
-  let mon_ord = get_mon_ord !monomial_order Singular in
+  let mon_ord =
+    match low_limb_names with
+    | [] -> get_mon_ord !monomial_order Singular
+    | _ ->
+       let low_count = List.length low_limb_names in
+       let remaining_count = List.length names - low_count in
+       if remaining_count = 0 then Printf.sprintf "lp(%d)" low_count
+       else Printf.sprintf "(lp(%d),dp(%d))" low_count remaining_count in
   String.concat "\n" [
       comment;
       "proc is_generator(poly p, ideal I) {";
