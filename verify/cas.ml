@@ -1075,7 +1075,187 @@ let get_mon_ord order solver =
      raise (Failure msg)
   | Some ord -> ord
 
+
+type singular_pack_candidate =
+  {
+    candidate_low : var;
+    candidate_expr : eexp;
+    candidate_tail : eexp list;
+  }
+
+type singular_pack =
+  {
+    pack_low : var;
+    pack_expr : eexp;
+    pack_tail : eexp list;
+    pack_var : var;
+  }
+
+let rec flatten_eadds e =
+  match e with
+  | Ebinop (Eadd, e1, e2) -> flatten_eadds e1 @ flatten_eadds e2
+  | _ -> [e]
+
+let power_of_two_exponent e =
+  match e with
+  | Ebinop (Epow, Econst two, Econst exponent)
+      when Z.equal two z_two && Z.sign exponent >= 0 ->
+     Some exponent
+  | Econst coefficient when Z.sign coefficient > 0 ->
+     let rec loop exponent value =
+       if Z.equal value Z.one then Some exponent
+       else if Z.equal (Z.erem value z_two) Z.zero then
+         loop (Z.succ exponent) (Z.ediv value z_two)
+       else
+         None in
+     loop Z.zero coefficient
+  | _ -> None
+
+let limb_term e =
+  match e with
+  | Ebinop (Emul, e1, e2) ->
+     (match power_of_two_exponent e2 with
+      | Some exponent -> Some (exponent, e1)
+      | None ->
+         (match power_of_two_exponent e1 with
+          | Some exponent -> Some (exponent, e2)
+          | None -> None))
+  | _ -> Some (Z.zero, e)
+
+let packed_limb_candidate e =
+  let terms = flatten_eadds e in
+  if List.length terms < 2 then
+    None
+  else
+    match List.map limb_term terms with
+    | parsed when List.for_all Option.is_some parsed ->
+       let parsed =
+         List.map Option.get parsed
+         |> List.sort (fun (e1, _) (e2, _) -> Z.compare e1 e2) in
+       (match parsed with
+        | (zero, Evar low) :: (stride, _) :: rest
+            when Z.equal zero Z.zero && Z.sign stride > 0 ->
+           let rec check expected = function
+             | [] -> true
+             | (exponent, _) :: tl ->
+                Z.equal exponent expected
+                && check (Z.add expected stride) tl in
+           if check (Z.add stride stride) rest then
+             let tail =
+               List.filter_map
+                 (fun term ->
+                   match limb_term term with
+                   | Some (exponent, _)
+                       when not (Z.equal exponent Z.zero) -> Some term
+                   | _ -> None)
+                 terms in
+             Some {
+                 candidate_low = low;
+                 candidate_expr = e;
+                 candidate_tail = tail;
+               }
+           else
+             None
+        | _ -> None)
+    | _ -> None
+
+let collect_singular_pack_candidates expressions =
+  let seen = ref EES.empty in
+  let candidates = ref [] in
+  let rec visit e =
+    match packed_limb_candidate e with
+    | Some candidate ->
+       if not (EES.mem e !seen) then begin
+         seen := EES.add e !seen;
+         candidates := candidate :: !candidates
+       end
+    | None ->
+       match e with
+       | Evar _ | Econst _ -> ()
+       | Eunop (_, e1) -> visit e1
+       | Ebinop (_, e1, e2) ->
+          visit e1;
+          visit e2 in
+  List.iter visit expressions;
+  List.rev !candidates
+
+let select_singular_packs vars candidates =
+  let used_names =
+    List.fold_left
+      (fun names v -> SS.add v.cached_name names) SS.empty vars in
+  let rec fresh_name used next =
+    let name = "cl_pack_" ^ string_of_int next in
+    if SS.mem name used then
+      fresh_name used (next + 1)
+    else
+      (name, SS.add name used, next + 1) in
+  let rec select used seen next selected = function
+    | [] -> List.rev selected
+    | candidate :: tl ->
+       if VS.mem candidate.candidate_low seen then
+         select used seen next selected tl
+       else
+         let (name, used, next) = fresh_name used next in
+         let pack_var =
+           mkvar ~newvid:true name candidate.candidate_low.vtyp in
+         let _ = cache_var_name pack_var in
+         let pack =
+           {
+             pack_low = candidate.candidate_low;
+             pack_expr = candidate.candidate_expr;
+             pack_tail = candidate.candidate_tail;
+             pack_var;
+           } in
+         select used (VS.add candidate.candidate_low seen)
+           next (pack :: selected) tl in
+  select used_names VS.empty 0 [] candidates
+
+let prepare_singular_input vars gen p =
+  let default_mon_ord () =
+    get_mon_ord !monomial_order Singular in
+  if not !algebra_pack_limbs || gen = [] then
+    (vars, gen, p, default_mon_ord ())
+  else
+    let packs =
+      collect_singular_pack_candidates (p :: gen)
+      |> select_singular_packs vars in
+    match packs with
+    | [] -> (vars, gen, p, default_mon_ord ())
+    | _ ->
+       let substitutions =
+         List.fold_left
+           (fun env pack ->
+             VM.add pack.pack_low
+               (esub (evar pack.pack_var) (eadds pack.pack_tail))
+               env)
+           VM.empty packs in
+       let rewrite e = fst (subst_eexp substitutions e) in
+       let linking_generators =
+         List.map
+           (fun pack -> esub (evar pack.pack_var) pack.pack_expr)
+           packs in
+       let gen = List.map rewrite gen @ linking_generators in
+       let p = rewrite p in
+       let low_vars =
+         List.fold_left
+           (fun low_vars pack -> VS.add pack.pack_low low_vars)
+           VS.empty packs in
+       let vars =
+         List.map (fun pack -> pack.pack_low) packs
+         @ List.map (fun pack -> pack.pack_var) packs
+         @ List.filter (fun v -> not (VS.mem v low_vars)) vars in
+       let low_count = List.length packs in
+       let other_count = List.length vars - low_count in
+       let mon_ord =
+         if other_count = 0 then
+           Printf.sprintf "lp(%d)" low_count
+         else
+           Printf.sprintf "(lp(%d),%s(%d))"
+             low_count (default_mon_ord ()) other_count in
+       (vars, gen, p, mon_ord)
+
 let bprint_singular_input ?comments buf vars gen p =
+  let (vars, gen, p, mon_ord) = prepare_singular_input vars gen p in
   let bprint_varseq () =
     match vars with
     | [] -> Buffer.add_char buf 'x'
@@ -1096,7 +1276,6 @@ let bprint_singular_input ?comments buf vars gen p =
             Buffer.add_string buf c
         ) comments
     else () in
-  let mon_ord = get_mon_ord !monomial_order Singular in
   match gen with
   | [] ->
     (* If gen is empty, we simply check if p equals 0.
@@ -1128,6 +1307,7 @@ let bprint_singular_input ?comments buf vars gen p =
     Buffer.add_string buf "exit;\n"
 
 let generate_singular_input ?comments vars gen p =
+  let (vars, gen, p, mon_ord) = prepare_singular_input vars gen p in
   let varseq =
     match vars with
     | [] -> "x"
@@ -1142,7 +1322,6 @@ let generate_singular_input ?comments vars gen p =
     then Option.value (Option.map (make_line_comments "//") comments)
            ~default:""
     else "" in
-  let mon_ord = get_mon_ord !monomial_order Singular in
   match gen with
   | [] ->
     (* If gen is empty, we simply check if p equals 0.

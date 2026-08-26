@@ -196,6 +196,9 @@ val algebra_solver : algebra_solver ref
 val algebra_solver_args : string ref
 (** additional arguments passed to the algebra solver *)
 
+val algebra_pack_limbs : bool ref
+(** abstract packed limb expressions in Singular inputs *)
+
 val string_of_algebra_solver : algebra_solver -> string
 (** string representation of an algebra solver *)
 

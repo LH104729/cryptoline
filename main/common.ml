@@ -59,6 +59,12 @@ let args_verifier =
            "ARGS";
            "Specify additional arguments passed to the algebra solver."
     ]));
+    ("-algebra-pack-limbs", Set algebra_pack_limbs,
+     mk_arg_desc([
+           "";
+           "In Singular inputs, abstract packed limb expressions with fresh";
+           "variables and equations defining those variables."
+    ]));
     ("-algebra_smt_expn_op",
      String (fun str -> native_smtlib_expn_operator := Some str),
      mk_arg_desc([

@@ -194,6 +194,8 @@ let algebra_solver = ref default_algebra_solver
 
 let algebra_solver_args = ref ""
 
+let algebra_pack_limbs = ref false
+
 let string_of_algsmt_logic l =
   match l with
   | NIA -> "nia"

@@ -12,6 +12,55 @@ implementations in
 [PQClean](https://github.com/pqclean/PQClean), etc.
 
 
+This Fork
+=========
+
+This fork adds the `-algebra-pack-limbs` option for the Singular algebra
+backend. When enabled, CryptoLine detects packed limb expressions such as
+
+```
+a0 + a1 * 2^w + a2 * 2^(2*w) + ...
+```
+
+and introduces a fresh variable, for example `cl_pack_0`, representing the
+packed value. A defining equation is added to the ideal:
+
+```
+cl_pack_0 - (a0 + a1 * 2^w + a2 * 2^(2*w) + ...)
+```
+
+Occurrences of the low limb are then rewritten as
+
+```
+a0 = cl_pack_0 - (a1 * 2^w + a2 * 2^(2*w) + ...)
+```
+
+so Singular can operate on the compact packed variable instead of repeatedly
+expanding the full limb expression.
+
+When packed limbs are used, the Singular variable order is also changed so
+that the low limbs come first, followed by the fresh packed variables and the
+remaining variables. The low limbs are placed in a leading `lp` block, while
+the configured monomial order is preserved for all remaining variables:
+
+```
+(lp(number_of_low_limbs), configured_order(number_of_remaining_variables))
+```
+
+For example, with the default `lex` monomial order, this becomes
+`(lp(k),lp(n-k))`; with `grevlex`, it becomes `(lp(k),dp(n-k))`. The leading
+`lp` block encourages Singular to eliminate the low limbs in favor of the
+packed variables without unnecessarily changing the monomial order used for
+the rest of the problem. This can reduce the size of the polynomials handled
+by Singular and improve algebraic verification performance.
+
+Enable the optimization with:
+
+```
+$ cv -algebra-pack-limbs program.cl
+```
+
+
 Prerequisite
 ============
 
